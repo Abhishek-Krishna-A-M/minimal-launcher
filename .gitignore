@@ -1,0 +1,17 @@
+# Android / IntelliJ
+.gradle/
+build/
+app/build/
+*.iml
+.idea/
+local.properties
+
+# Signing files
+*.jks
+*.keystore
+
+# OS junk
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
