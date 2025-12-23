@@ -1,5 +1,6 @@
 package com.minimal.launcher
 
+import android.accessibilityservice.AccessibilityService
 import android.app.Activity
 import android.app.WallpaperManager
 import android.content.Intent
@@ -11,6 +12,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -28,7 +30,6 @@ import kotlinx.coroutines.delay
 import java.util.*
 import kotlin.math.abs
 
-// 1. GLOBAL ENUM
 enum class Screen { HOME, STATS, APPS, SETTINGS_SEARCH }
 
 class MainActivity : ComponentActivity() {
@@ -37,10 +38,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Brute force edge-to-edge
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        
-        // Force the layout to use the cutout (notch) area
         window.attributes.layoutInDisplayCutoutMode = 
             android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
 
@@ -53,7 +51,6 @@ class MainActivity : ComponentActivity() {
                 if (!view.isInEditMode) {
                     SideEffect {
                         val window = (view.context as Activity).window
-                        // Final override for transparency
                         window.statusBarColor = android.graphics.Color.TRANSPARENT
                         window.navigationBarColor = android.graphics.Color.TRANSPARENT
                         
@@ -63,7 +60,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Outer Box: NO padding here, must be full-bleed for scanlines/wallpaper
                 Box(modifier = Modifier.fillMaxSize()) {
                     ScanlineOverlay() 
                     MainContainer(screenState)
@@ -110,7 +106,6 @@ fun MainContainer(state: MutableState<Screen>) {
                 }
             })
         }) {
-            // Apply padding ONLY to the screen content, NOT the background/scanlines
             Box(modifier = Modifier.systemBarsPadding()) {
                 when (current) {
                     Screen.HOME -> HomeScreen()
@@ -125,6 +120,7 @@ fun MainContainer(state: MutableState<Screen>) {
 
 @Composable
 fun HomeScreen() {
+    val context = LocalContext.current
     var time by remember { mutableStateOf("") }
     var date by remember { mutableStateOf("") }
 
@@ -139,7 +135,24 @@ fun HomeScreen() {
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().padding(32.dp)) {
+    // This Box captures the double tap to lock
+    Box(modifier = Modifier
+        .fillMaxSize()
+        .pointerInput(Unit) {
+            detectTapGestures(
+                onDoubleTap = {
+                    val locked = LockService.instance?.performGlobalAction(
+                        AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
+                    )
+                    if (locked != true) {
+                        val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        context.startActivity(intent)
+                    }
+                }
+            )
+        }
+        .padding(32.dp)
+    ) {
         Column(modifier = Modifier.align(Alignment.BottomStart)) {
             Text(text = time, style = MaterialTheme.typography.displayLarge)
             Text(

@@ -18,6 +18,18 @@
 android:icon="@android:mipmap/sym_def_app_icon"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         
+        <service
+    android:name=".LockService"
+    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+    android:exported="false">
+    <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+    </intent-filter>
+    <meta-data
+        android:name="android.accessibilityservice"
+        android:resource="@xml/accessibility_service_config" />
+</service>
+        
         <activity
             android:name=".MainActivity"
             android:exported="true"
