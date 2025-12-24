@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -38,9 +39,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // 1. Remove black bars by allowing content to flow behind status/nav bars
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        
+        // 2. Force the UI to use the notch/cutout area
         window.attributes.layoutInDisplayCutoutMode = 
-            android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
 
         setContent {
             val context = LocalContext.current
@@ -51,6 +55,7 @@ class MainActivity : ComponentActivity() {
                 if (!view.isInEditMode) {
                     SideEffect {
                         val window = (view.context as Activity).window
+                        // Make bars completely transparent
                         window.statusBarColor = android.graphics.Color.TRANSPARENT
                         window.navigationBarColor = android.graphics.Color.TRANSPARENT
                         
@@ -60,6 +65,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // Root Box: No padding here so Scanlines fill the GLASS edges
                 Box(modifier = Modifier.fillMaxSize()) {
                     ScanlineOverlay() 
                     MainContainer(screenState)
@@ -70,6 +76,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
+        // Return to home screen when 'Home' button is pressed
         screenState.value = Screen.HOME
     }
 
@@ -106,7 +113,8 @@ fun MainContainer(state: MutableState<Screen>) {
                 }
             })
         }) {
-            Box(modifier = Modifier.systemBarsPadding()) {
+            // Apply Safe Area padding only to the content (Text/Buttons), not the background
+            Box(modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars)) {
                 when (current) {
                     Screen.HOME -> HomeScreen()
                     Screen.STATS -> StatsPage { current = Screen.HOME }
@@ -135,7 +143,7 @@ fun HomeScreen() {
         }
     }
 
-    // This Box captures the double tap to lock
+    // Double Tap to Lock Logic
     Box(modifier = Modifier
         .fillMaxSize()
         .pointerInput(Unit) {

@@ -1,7 +1,9 @@
 package com.minimal.launcher
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -30,24 +32,53 @@ data class AppInfo(val label: String, val packageName: String)
 fun AppDrawer(onBack: () -> Unit) {
     val context = LocalContext.current
     val focusRequester = remember { FocusRequester() }
+    val prefs = remember { context.getSharedPreferences("app_usage_cache", Context.MODE_PRIVATE) }
     var searchQuery by remember { mutableStateOf("") }
-    
-    val allApps = remember { getInstalledApps(context) }
-    
-    // DEFINE YOUR ALIASES HERE
+    var allApps by remember { mutableStateOf<List<AppInfo>>(getInstalledApps(context)) }
+
+    // BroadcastReceiver for real-time list updates
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                context?.let { allApps = getInstalledApps(it) }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addDataScheme("package")
+        }
+        context.registerReceiver(receiver, filter)
+        onDispose { context.unregisterReceiver(receiver) }
+    }
+
     val aliases = remember {
         mapOf(
             "c" to "com.android.camera",
             "t" to "com.termux",
-            "s" to "com.android.settings" // Alias 'm' for main settings
+            "s" to "com.android.settings"
         )
     }
 
-    val filteredApps = remember(searchQuery) {
+    // High-speed filtering logic
+    val filteredApps = remember(searchQuery, allApps) {
+        val query = searchQuery.trim().lowercase()
+        val now = System.currentTimeMillis()
+        val oneHour = 3600000L
+
         when {
-            searchQuery.trim() == "ls" -> allApps
-            searchQuery.startsWith("google ") -> emptyList()
-            else -> allApps.filter { it.label.contains(searchQuery, ignoreCase = true) }
+            query == "ls" -> allApps
+            query.isEmpty() -> {
+                allApps.filter { (now - prefs.getLong(it.packageName, 0L)) < oneHour }
+            }
+            query in listOf("cls", "exit", "quit") -> emptyList()
+            query.startsWith("rm ") || query.startsWith("install ") -> emptyList()
+            else -> {
+                // Better search: matches starting with query first, then matches containing query
+                val startsWith = allApps.filter { it.label.lowercase().startsWith(query) }
+                val contains = allApps.filter { it.label.lowercase().contains(query) && !it.label.lowercase().startsWith(query) }
+                startsWith + contains
+            }
         }
     }
 
@@ -65,7 +96,10 @@ fun AppDrawer(onBack: () -> Unit) {
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                 keyboardActions = KeyboardActions(
-                    onGo = { handleCommand(searchQuery, filteredApps, aliases, context, onBack) }
+                    onGo = { 
+                        handleCommand(searchQuery, allApps, aliases, context, prefs, onBack)
+                        searchQuery = "" 
+                    }
                 )
             )
         }
@@ -74,24 +108,31 @@ fun AppDrawer(onBack: () -> Unit) {
         Divider(color = TerminalBlue.copy(alpha = 0.3f), thickness = 1.dp)
         Spacer(modifier = Modifier.height(10.dp))
 
-        LazyColumn {
-            if (searchQuery.isEmpty()) {
-                item {
-                    Text(
-                        text = "aliases: ${aliases.keys.joinToString(", ")} | type 'ls' for all",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TerminalBlue.copy(alpha = 0.4f),
-                        modifier = Modifier.padding(vertical = 8.dp)
-                    )
+        LazyColumn(modifier = Modifier.weight(1f)) {
+            item {
+                val headerText = when {
+                    searchQuery.isEmpty() -> "--- SESSION_ACTIVE (1H) ---"
+                    searchQuery == "ls" -> "--- ALL_PACKAGES ---"
+                    else -> "--- SEARCH_RESULTS ---"
                 }
+                Text(
+                    text = headerText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TerminalBlue.copy(alpha = 0.4f),
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
             }
 
-            items(filteredApps) { app ->
+            items(filteredApps, key = { it.packageName }) { app ->
                 Text(
                     text = "> ${app.label.lowercase()}",
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { launchApp(context, app.packageName) }
+                        .clickable { 
+                            prefs.edit().putLong(app.packageName, System.currentTimeMillis()).apply()
+                            launchApp(context, app.packageName)
+                            onBack()
+                        }
                         .padding(vertical = 12.dp),
                     style = MaterialTheme.typography.bodyLarge,
                     color = TerminalBlue
@@ -101,35 +142,87 @@ fun AppDrawer(onBack: () -> Unit) {
     }
 }
 
-private fun handleCommand(query: String, filtered: List<AppInfo>, aliases: Map<String, String>, context: Context, onBack: () -> Unit) {
+private fun handleCommand(
+    query: String, 
+    allApps: List<AppInfo>, 
+    aliases: Map<String, String>, 
+    context: Context, 
+    prefs: android.content.SharedPreferences,
+    onBack: () -> Unit
+) {
     val input = query.trim().lowercase()
     when {
         input == "exit" || input == "quit" -> onBack()
-        aliases.containsKey(input) -> {
-            launchApp(context, aliases[input]!!)
-            onBack()
-        }
+        input == "cls" -> prefs.edit().clear().apply()
+        
+        // --- RESTORED GOOGLE SEARCH ---
         input.startsWith("google ") -> {
-            val q = query.substringAfter("google ")
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=$q")))
+            val q = query.substringAfter("google ").trim()
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=$q"))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
         }
-        filtered.isNotEmpty() -> {
-            launchApp(context, filtered.first().packageName)
+        
+        // --- FIXED RM LOGIC (Triggers System Popup) ---
+        input.startsWith("rm ") -> {
+            val target = input.removePrefix("rm ").trim()
+            // Find by label or package name
+            val app = allApps.find { it.label.equals(target, ignoreCase = true) } 
+                   ?: allApps.find { it.packageName.equals(target, ignoreCase = true) }
+            
+            app?.let {
+                // This triggers the standard Android "Do you want to uninstall this app?" dialog
+                val intent = Intent(Intent.ACTION_DELETE).apply {
+                    data = Uri.parse("package:${it.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                // We don't remove from cache here; the BroadcastReceiver will handle it 
+                // once the system actually finishes the uninstallation.
+            }
+        }
+        
+        input.startsWith("install ") -> {
+            val q = input.removePrefix("install ").trim()
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://search?q=$q")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        }
+
+        aliases.containsKey(input) -> {
+            val pkg = aliases[input]!!
+            prefs.edit().putLong(pkg, System.currentTimeMillis()).apply()
+            launchApp(context, pkg)
             onBack()
+        }
+
+        else -> {
+            val match = allApps.find { it.label.lowercase().startsWith(input) } 
+                ?: allApps.find { it.label.contains(input, ignoreCase = true) }
+            
+            match?.let {
+                prefs.edit().putLong(it.packageName, System.currentTimeMillis()).apply()
+                launchApp(context, it.packageName)
+                onBack()
+            }
         }
     }
 }
 
 private fun launchApp(context: Context, packageName: String) {
-    val intent = context.packageManager.getLaunchIntentForPackage(packageName)
-    intent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    intent?.let { context.startActivity(it) }
+    context.packageManager.getLaunchIntentForPackage(packageName)?.let {
+        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(it)
+    }
 }
 
 private fun getInstalledApps(context: Context): List<AppInfo> {
     val pm = context.packageManager
     val intent = Intent(Intent.ACTION_MAIN, null).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
     return pm.queryIntentActivities(intent, 0)
+        .asSequence() // Use sequence for faster mapping on large app lists
         .map { AppInfo(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
         .sortedBy { it.label.lowercase() }
+        .toList()
 }
