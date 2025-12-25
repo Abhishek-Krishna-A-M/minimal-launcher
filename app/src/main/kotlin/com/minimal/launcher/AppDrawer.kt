@@ -1,8 +1,11 @@
 package com.minimal.launcher
 
+import android.Manifest
 import android.content.*
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.CallLog
+import android.provider.ContactsContract
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -23,13 +26,11 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.minimal.launcher.ui.theme.DeepNavy
 import com.minimal.launcher.ui.theme.TerminalBlue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import android.content.pm.PackageManager
-import androidx.core.content.ContextCompat
-import android.provider.ContactsContract
 
 /* -------------------------------------------------- */
 /* MODELS                                            */
@@ -42,11 +43,11 @@ data class ContactEntry(
 )
 
 /* -------------------------------------------------- */
-/* GLOBAL CACHE                                      */
+/* GLOBAL CACHES                                     */
 /* -------------------------------------------------- */
 
-private var globalAppCache: List<AppInfo>? = null
-private var globalContactsCache: List<ContactEntry>? = null
+private var appCache: List<AppInfo>? = null
+private var contactsCache: List<ContactEntry>? = null
 
 /* -------------------------------------------------- */
 /* APP DRAWER                                        */
@@ -57,76 +58,69 @@ fun AppDrawer(onBack: () -> Unit) {
 
     val context = LocalContext.current
     val focusRequester = remember { FocusRequester() }
-
     val prefs = remember {
         context.getSharedPreferences("app_usage_cache", Context.MODE_PRIVATE)
     }
 
     var query by remember { mutableStateOf("") }
     var apps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
-    var recentContacts by remember { mutableStateOf<List<ContactEntry>>(emptyList()) }
+    var recentCalls by remember { mutableStateOf<List<ContactEntry>>(emptyList()) }
 
     /* ---------- LOAD APPS ONCE ---------- */
     LaunchedEffect(Unit) {
-        if (globalAppCache == null) {
-            globalAppCache = loadApps(context)
+        if (appCache == null) {
+            appCache = loadApps(context)
         }
-        apps = globalAppCache!!
+        apps = appCache!!
         focusRequester.requestFocus()
     }
 
-/* ---------- LOAD CONTACT SOURCES (TIERED) ---------- */
-LaunchedEffect(query) {
+    /* ---------- CONTACT LOADING (ON DEMAND) ---------- */
+    LaunchedEffect(query) {
+        when {
+            query == "p:" -> {
+                if (recentCalls.isEmpty()) {
+                    recentCalls = loadRecentCalls(context)
+                }
+            }
 
-    when {
-        // Tier-1: just "p:" or "wa:" → recent calls only
-        (query == "p:" || query == "wa:") -> {
-            if (recentContacts.isEmpty()) {
-                recentContacts = loadRecentContacts(context)
+            query.startsWith("p:") && query.length > 3 -> {
+                if (contactsCache == null) {
+                    contactsCache = loadAllContacts(context)
+                }
+            }
+
+            !query.startsWith("p:") -> {
+                recentCalls = emptyList()
             }
         }
-
-        // Tier-2: "p:d", "p:dad", etc → full contacts (once)
-        query.startsWith("p:") && query.length > 3 -> {
-            if (globalContactsCache == null) {
-                globalContactsCache = loadAllContacts(context)
-            }
-        }
-
-        // Leaving contact mode → clear recent list
-else -> {
-    if (!query.startsWith("p:") && !query.startsWith("wa:")) {
-        recentContacts = emptyList()
     }
-}
-    }
-}
+
     /* ---------- RESULTS ---------- */
-    val results by remember(query, apps, recentContacts) {
+    val results by remember(query, apps, recentCalls) {
         derivedStateOf {
             val q = query.trim().lowercase()
 
             when {
-                q == "p:" || q == "wa:" ->
-                    recentContacts
+                q == "p:" ->
+                    recentCalls
 
-q.startsWith("p:") -> {
-    val key = q.drop(2).trim()
+                q.startsWith("p:") -> {
+                    val key = q.drop(2).trim()
 
-    when {
-        key.isEmpty() ->
-            recentContacts                         // Tier-1
+                    when {
+                        key.isEmpty() ->
+                            recentCalls
 
-        key.any { it.isDigit() } ->
-            listOf(ContactEntry(key, normalizePhoneNumber(key)))
+                        key.any(Char::isDigit) ->
+                            listOf(ContactEntry(key, normalizeNumber(key)))
 
-        globalContactsCache != null ->
-            fuzzyContacts(key, globalContactsCache!!)
+                        contactsCache != null ->
+                            fuzzyContacts(key, contactsCache!!)
 
-        else ->
-            emptyList()
-    }
-}
+                        else -> emptyList()
+                    }
+                }
 
                 q.isEmpty() -> {
                     val now = System.currentTimeMillis()
@@ -134,17 +128,24 @@ q.startsWith("p:") -> {
                         now - prefs.getLong(it.packageName, 0L) < 3_600_000
                     }
                 }
+q.startsWith("rm") -> {
+    val key = q.removePrefix("rm").trim()
+
+    if (key.isEmpty()) {
+        apps
+    } else {
+        fuzzyApps(key, apps)
+    }
+}
 
                 q == "ls" -> apps
 
                 q.startsWith("g:") ||
-                q.startsWith("m:") ||
-                q.startsWith("yt:") ||
-                q.startsWith("rm ") ||
                 q.startsWith("install ") ||
                 q == "cls" ||
                 q == "exit" ||
-                q == "quit" -> emptyList()
+                q == "quit" ->
+                    emptyList()
 
                 else -> fuzzyApps(q, apps)
             }
@@ -173,7 +174,9 @@ q.startsWith("p:") -> {
             BasicTextField(
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
                 textStyle = terminalStyle,
                 cursorBrush = SolidColor(TerminalBlue),
                 singleLine = true,
@@ -196,14 +199,11 @@ q.startsWith("p:") -> {
             item {
                 Text(
                     text = when {
-                        query.startsWith("p:") || query.startsWith("wa:") ->
-                            "--- RECENT CONTACTS ---"
-                        query.isEmpty() ->
-                            "--- SESSION_ACTIVE (1H) ---"
-                        query == "ls" ->
-                            "--- APPLICATIONS ---"
-                        else ->
-                            "--- SEARCH_RESULTS ---"
+                        query.startsWith("rm") -> "--- UNINSTALL ---"
+                        query.startsWith("p:") -> "--- CONTACTS ---"
+                        query.isEmpty() -> "--- SESSION_ACTIVE (1H) ---"
+                        query == "ls" -> "--- APPLICATIONS ---"
+                        else -> "--- SEARCH_RESULTS ---"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = TerminalBlue.copy(alpha = 0.4f),
@@ -254,17 +254,13 @@ private fun execute(
         q.startsWith("install ") ->
             openWeb(context, "market://search?q=${q.drop(8)}")
 
-        q.startsWith("rm ") -> {
-            val target = q.drop(3)
-            results.filterIsInstance<AppInfo>()
-                .firstOrNull { it.labelLower == target || it.packageName == target }
-                ?.let {
-                    context.startActivity(
-                        Intent(Intent.ACTION_DELETE, Uri.parse("package:${it.packageName}"))
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
-                }
-        }
+q.startsWith("rm") && results.isNotEmpty() -> {
+    val app = results.first() as AppInfo
+    context.startActivity(
+        Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.packageName}"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    )
+}
 
         results.isNotEmpty() ->
             executeItem(results.first(), q, context, prefs, onBack)
@@ -283,11 +279,7 @@ private fun executeItem(
             launchAndTrack(context, item.packageName, prefs, onBack)
 
         is ContactEntry -> {
-            if (query.startsWith("wa:")) {
-                openWeb(context, "https://wa.me/${item.number}")
-            } else {
-callOrDial(context, item.number)
-            }
+            callOrDial(context, item.number)
             onBack()
         }
     }
@@ -306,8 +298,8 @@ private suspend fun loadApps(context: Context): List<AppInfo> =
             .sortedBy { it.labelLower }
     }
 
-private fun loadRecentContacts(context: Context): List<ContactEntry> {
-    val result = ArrayList<ContactEntry>()
+private fun loadRecentCalls(context: Context): List<ContactEntry> {
+    val list = ArrayList<ContactEntry>()
     val seen = HashSet<String>()
 
     val cursor = context.contentResolver.query(
@@ -319,60 +311,112 @@ private fun loadRecentContacts(context: Context): List<ContactEntry> {
     )
 
     cursor?.use {
-        while (it.moveToNext() && result.size < 25) {
-            val number = it.getString(0) ?: continue
-            if (!seen.add(number)) continue
-            val name = it.getString(1) ?: number
-result += ContactEntry(
-    name = name,
-    number = normalizePhoneNumber(number)
-)
+        while (it.moveToNext() && list.size < 25) {
+            val raw = it.getString(0) ?: continue
+            if (!seen.add(raw)) continue
+            val name = it.getString(1) ?: raw
+            list += ContactEntry(name, normalizeNumber(raw))
         }
     }
-    return result
+    return list
+}
+
+private fun loadAllContacts(context: Context): List<ContactEntry> {
+    val list = ArrayList<ContactEntry>()
+
+    val cursor = context.contentResolver.query(
+        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+        arrayOf(
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+            ContactsContract.CommonDataKinds.Phone.NUMBER
+        ),
+        null, null,
+        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+    )
+
+    cursor?.use {
+        while (it.moveToNext()) {
+            val name = it.getString(0) ?: continue
+            val number = normalizeNumber(it.getString(1) ?: continue)
+            list += ContactEntry(name, number)
+        }
+    }
+    return list
 }
 
 /* -------------------------------------------------- */
 /* FUZZY                                             */
 /* -------------------------------------------------- */
 
-private fun fuzzyApps(query: String, apps: List<AppInfo>): List<AppInfo> =
+private fun fuzzyApps(q: String, apps: List<AppInfo>): List<AppInfo> =
     apps.mapNotNull {
-        val score = fuzzyScore(query, it.labelLower)
-        if (score >= 0) it to score else null
+        val s = fuzzyScore(q, it.labelLower)
+        if (s >= 0) it to s else null
     }.sortedByDescending { it.second }.map { it.first }
 
-private fun fuzzyContacts(query: String, contacts: List<ContactEntry>): List<ContactEntry> =
-    if (query.isEmpty()) contacts else
-        contacts.mapNotNull {
-            val score = fuzzyScore(query, it.nameLower)
-            if (score >= 0) it to score else null
-        }.sortedByDescending { it.second }.map { it.first }
+private fun fuzzyContacts(q: String, contacts: List<ContactEntry>): List<ContactEntry> =
+    contacts.mapNotNull {
+        val s = fuzzyScore(q, it.nameLower)
+        if (s >= 0) it to s else null
+    }.sortedByDescending { it.second }.map { it.first }
 
-private fun fuzzyScore(query: String, target: String): Int {
+private fun fuzzyScore(q: String, t: String): Int {
     var score = 0
     var qi = 0
-    for (c in target) {
-        if (qi < query.length && c == query[qi]) {
+    var lastMatch = -1
+
+    for (i in t.indices) {
+        if (qi < q.length && t[i] == q[qi]) {
             score += 10
+
+            // Penalize gaps
+            if (lastMatch >= 0) {
+                score -= (i - lastMatch - 1)
+            }
+
+            // Early match bonus
+            if (qi == 0) {
+                score += (t.length - i)
+            }
+
+            lastMatch = i
             qi++
         }
     }
-    return if (qi == query.length) score else -1
+
+    if (qi != q.length) return -1
+
+    // Strong prefix bonus
+    if (t.startsWith(q)) score += 50
+
+    return score
 }
 
 /* -------------------------------------------------- */
 /* UTILS                                             */
 /* -------------------------------------------------- */
-private fun normalizePhoneNumber(raw: String): String {
-    val digits = raw.filter(Char::isDigit)
 
+private fun normalizeNumber(raw: String): String {
+    val d = raw.filter(Char::isDigit)
     return when {
-        digits.length == 10 -> digits
-        digits.length == 12 && digits.startsWith("91") -> "+$digits"
-        digits.length > 10 -> "+$digits"
-        else -> digits
+        d.length == 10 -> d
+        d.length > 10 -> "+$d"
+        else -> d
     }
+}
+
+private fun callOrDial(context: Context, number: String) {
+    val uri = Uri.parse("tel:$number")
+    val canCall =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) ==
+                PackageManager.PERMISSION_GRANTED
+
+    val intent = Intent(
+        if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL,
+        uri
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    context.startActivity(intent)
 }
 
 private fun openWeb(context: Context, url: String) {
@@ -395,57 +439,3 @@ private fun launchAndTrack(
         onBack()
     }
 }
-
-private fun callOrDial(
-    context: Context,
-    number: String
-) {
-    val uri = Uri.parse("tel:$number")
-
-    if (
-        ContextCompat.checkSelfPermission(
-            context,
-            android.Manifest.permission.CALL_PHONE
-        ) == PackageManager.PERMISSION_GRANTED
-    ) {
-        context.startActivity(
-            Intent(Intent.ACTION_CALL, uri)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
-    } else {
-        context.startActivity(
-            Intent(Intent.ACTION_DIAL, uri)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
-    }
-}
-private fun canDirectCall(context: Context): Boolean {
-    return ContextCompat.checkSelfPermission(
-        context,
-        android.Manifest.permission.CALL_PHONE
-    ) == PackageManager.PERMISSION_GRANTED
-}
-private fun loadAllContacts(context: Context): List<ContactEntry> {
-    val list = ArrayList<ContactEntry>()
-
-    val cursor = context.contentResolver.query(
-        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-        arrayOf(
-            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-            ContactsContract.CommonDataKinds.Phone.NUMBER
-        ),
-        null,
-        null,
-        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
-    )
-
-    cursor?.use {
-        while (it.moveToNext()) {
-            val name = it.getString(0) ?: continue
-            val number = normalizePhoneNumber(it.getString(1) ?: continue)
-            list += ContactEntry(name, number)
-        }
-    }
-    return list
-}
-
