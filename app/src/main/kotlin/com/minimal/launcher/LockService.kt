@@ -1,44 +1,49 @@
 package com.minimal.launcher
 
 import android.accessibilityservice.AccessibilityService
-import android.content.Intent
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.view.accessibility.AccessibilityEvent
 
+/**
+ * Minimal AccessibilityService used ONLY for locking the screen.
+ *
+ * Design goals:
+ * - Zero event listening
+ * - Zero background work
+ * - No sticky behavior
+ * - No wakeups
+ * - Let Android fully manage lifecycle
+ */
 class LockService : AccessibilityService() {
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Not needed for lock functionality
-    }
-
-    override fun onInterrupt() {
-        // Not needed
-    }
 
     override fun onServiceConnected() {
-        super.onServiceConnected()
+        // Explicitly tell Android we want NOTHING except global actions
+        serviceInfo = AccessibilityServiceInfo().apply {
+            eventTypes = 0                    // listen to nothing
+            feedbackType = 0                 // no feedback
+            notificationTimeout = 0
+            flags = 0                        // no default flags
+        }
+
         instance = this
     }
 
-    // This is the key fix for the malfunction
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // START_STICKY tells Android to recreate the service if it's killed due to memory pressure
-        return START_STICKY
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Will never be called because eventTypes = 0
     }
 
-    override fun onUnbind(intent: Intent?): Boolean {
-        instance = null
-        return super.onUnbind(intent)
+    override fun onInterrupt() {
+        // No-op
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         instance = null
+        super.onDestroy()
     }
 
     companion object {
         @Volatile
         var instance: LockService? = null
-            private set(value) {
-                field = value
-            }
+            private set
     }
 }

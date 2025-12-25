@@ -3,15 +3,14 @@ package com.minimal.launcher
 import android.accessibilityservice.AccessibilityService
 import android.app.Activity
 import android.app.WallpaperManager
-import android.content.Intent
-import android.graphics.Bitmap
+import android.content.*
 import android.graphics.drawable.BitmapDrawable
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -20,6 +19,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -27,69 +28,59 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import com.minimal.launcher.ui.theme.LauncherTheme
-import kotlinx.coroutines.delay
 import java.util.*
 import kotlin.math.abs
 
-enum class Screen { HOME, STATS, APPS, SETTINGS_SEARCH }
-
 class MainActivity : ComponentActivity() {
-    private var screenState = mutableStateOf(Screen.HOME)
+
+    private val screenState = mutableStateOf(Screen.HOME)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // 1. Remove black bars by allowing content to flow behind status/nav bars
+
+        window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        
-        // 2. Force the UI to use the notch/cutout area
-        window.attributes.layoutInDisplayCutoutMode = 
-            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
 
         setContent {
             val context = LocalContext.current
-            val isDarkText = remember { checkWallpaperLuminance(context) }
-            
-            LauncherTheme(darkText = isDarkText) {
+            var lightWallpaper by remember { mutableStateOf(false) }
+
+            LaunchedEffect(Unit) {
+                lightWallpaper = isWallpaperLight(context)
+            }
+
+            LauncherTheme(darkText = lightWallpaper) {
                 val view = LocalView.current
-                if (!view.isInEditMode) {
-                    SideEffect {
-                        val window = (view.context as Activity).window
-                        // Make bars completely transparent
-                        window.statusBarColor = android.graphics.Color.TRANSPARENT
-                        window.navigationBarColor = android.graphics.Color.TRANSPARENT
-                        
-                        val insetsController = WindowCompat.getInsetsController(window, view)
-                        insetsController.isAppearanceLightStatusBars = isDarkText
-                        insetsController.isAppearanceLightNavigationBars = isDarkText
+                SideEffect {
+                    val w = (view.context as Activity).window
+                    w.statusBarColor = android.graphics.Color.TRANSPARENT
+                    w.navigationBarColor = android.graphics.Color.TRANSPARENT
+                    WindowCompat.getInsetsController(w, view).apply {
+                        isAppearanceLightStatusBars = lightWallpaper
+                        isAppearanceLightNavigationBars = lightWallpaper
                     }
                 }
 
-                // Root Box: No padding here so Scanlines fill the GLASS edges
-                Box(modifier = Modifier.fillMaxSize()) {
-                    ScanlineOverlay() 
+                Box(Modifier.fillMaxSize()) {
+                    StaticScanlineOverlay()
                     MainContainer(screenState)
                 }
             }
         }
     }
 
-    override fun onNewIntent(intent: Intent?) {
-        super.onNewIntent(intent)
-        // Return to home screen when 'Home' button is pressed
-        screenState.value = Screen.HOME
-    }
-
-    private fun checkWallpaperLuminance(context: android.content.Context): Boolean {
+    private fun isWallpaperLight(context: Context): Boolean {
         return try {
-            val wm = WallpaperManager.getInstance(context)
-            val d = wm.drawable
+            val d = WallpaperManager.getInstance(context).drawable
             if (d is BitmapDrawable) {
-                val b = Bitmap.createScaledBitmap(d.bitmap, 1, 1, true)
-                val p = b.getPixel(0, 0)
-                (0.299 * android.graphics.Color.red(p) + 0.587 * android.graphics.Color.green(p) + 0.114 * android.graphics.Color.blue(p)) > 160
+                val p = d.bitmap.getPixel(0, 0)
+                (0.299 * android.graphics.Color.red(p)
+                        + 0.587 * android.graphics.Color.green(p)
+                        + 0.114 * android.graphics.Color.blue(p)) > 160
             } else false
-        } catch (e: Exception) { false }
+        } catch (_: Exception) {
+            false
+        }
     }
 }
 
@@ -98,30 +89,38 @@ fun MainContainer(state: MutableState<Screen>) {
     var current by state
     BackHandler(enabled = current != Screen.HOME) { current = Screen.HOME }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = Color.Transparent) {
-        Box(modifier = Modifier.fillMaxSize().pointerInput(Unit) {
-            detectDragGestures(onDrag = { change, dragAmount ->
-                change.consume()
-                val (x, y) = dragAmount
-                val s = 40f
-                if (abs(x) > abs(y)) {
-                    if (x > s) current = Screen.SETTINGS_SEARCH 
-                    if (x < -s) current = Screen.STATS
-                } else {
-                    if (y < -s) current = Screen.APPS
-                    if (y > s) current = Screen.HOME
-                }
-            })
-        }) {
-            // Apply Safe Area padding only to the content (Text/Buttons), not the background
-            Box(modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars)) {
-                when (current) {
-                    Screen.HOME -> HomeScreen()
-                    Screen.STATS -> StatsPage { current = Screen.HOME }
-                    Screen.APPS -> AppDrawer { current = Screen.HOME }
-                    Screen.SETTINGS_SEARCH -> SettingsSearch { current = Screen.HOME }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures()
+            }
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    val dx: Float = dragAmount.x
+                    val dy: Float = dragAmount.y
+
+                    if (abs(dx) > 80f || abs(dy) > 80f) {
+                        change.consume()
+
+                        when {
+                            abs(dx) > abs(dy) ->
+                                current =
+                                    if (dx > 0f) Screen.SETTINGS_SEARCH
+                                    else Screen.STATS
+
+                            dy < 0f -> current = Screen.APPS
+                            dy > 0f -> current = Screen.HOME
+                        }
+                    }
                 }
             }
+    ) {
+        when (current) {
+            Screen.HOME -> HomeScreen()
+            Screen.APPS -> AppDrawer { current = Screen.HOME }
+            Screen.STATS -> StatsPage { current = Screen.HOME }
+            Screen.SETTINGS_SEARCH -> SettingsSearch { current = Screen.HOME }
         }
     }
 }
@@ -129,43 +128,49 @@ fun MainContainer(state: MutableState<Screen>) {
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
-    var time by remember { mutableStateOf("") }
-    var date by remember { mutableStateOf("") }
+    val timeFormat = remember { java.text.SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val dateFormat = remember { java.text.SimpleDateFormat("EEE, MMM d", Locale.getDefault()) }
 
-    LaunchedEffect(Unit) {
-        val timeFormat = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
-        val dateFormat = java.text.SimpleDateFormat("EEEE, MMM d", Locale.getDefault())
-        while (true) {
-            val now = Calendar.getInstance().time
-            time = timeFormat.format(now)
-            date = dateFormat.format(now)
-            delay(10000)
+    var time by remember { mutableStateOf(timeFormat.format(Date())) }
+    var date by remember { mutableStateOf(dateFormat.format(Date())) }
+
+    DisposableEffect(Unit) {
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, i: Intent?) {
+                val now = Date()
+                time = timeFormat.format(now)
+                date = dateFormat.format(now)
+            }
         }
+        context.registerReceiver(r, IntentFilter(Intent.ACTION_TIME_TICK))
+        onDispose { context.unregisterReceiver(r) }
     }
 
-    // Double Tap to Lock Logic
-    Box(modifier = Modifier
-        .fillMaxSize()
-        .pointerInput(Unit) {
-            detectTapGestures(
-                onDoubleTap = {
-                    val locked = LockService.instance?.performGlobalAction(
-                        AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
-                    )
-                    if (locked != true) {
-                        val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        context.startActivity(intent)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        LockService.instance?.performGlobalAction(
+                            AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
+                        )
                     }
-                }
-            )
-        }
-        .padding(32.dp)
+                )
+            }
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(32.dp)
     ) {
         Column(modifier = Modifier.align(Alignment.BottomStart)) {
-            Text(text = time, style = MaterialTheme.typography.displayLarge)
+Text(
+    text = time,
+    style = MaterialTheme.typography.displayLarge,
+    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+)
             Text(
-                text = date, 
-                style = MaterialTheme.typography.bodyLarge, 
+                text = date,
+                style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
             )
         }
@@ -173,15 +178,28 @@ fun HomeScreen() {
 }
 
 @Composable
-fun ScanlineOverlay() {
-    Canvas(modifier = Modifier.fillMaxSize().graphicsLayer(alpha = 0.15f)) {
-        for (y in 0..size.height.toInt() step 6) {
-            drawLine(
-                color = Color.Black,
-                start = androidx.compose.ui.geometry.Offset(0f, y.toFloat()),
-                end = androidx.compose.ui.geometry.Offset(size.width, y.toFloat()),
-                strokeWidth = 2f
-            )
+fun StaticScanlineOverlay() {
+    val scanlineBitmap: ImageBitmap = remember {
+        val bmp = android.graphics.Bitmap.createBitmap(
+            400, 800, android.graphics.Bitmap.Config.ARGB_8888
+        )
+        val canvas = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint().apply {
+            color = android.graphics.Color.BLACK
+            alpha = 18
+            strokeWidth = 1f
         }
+        for (y in 0 until 800 step 4) {
+            canvas.drawLine(0f, y.toFloat(), 400f, y.toFloat(), paint)
+        }
+        bmp.asImageBitmap()
     }
+
+    Image(
+        bitmap = scanlineBitmap,
+        contentDescription = null,
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer(alpha = 0.06f)
+    )
 }

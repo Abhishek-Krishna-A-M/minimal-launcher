@@ -7,7 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -19,6 +19,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.minimal.launcher.ui.theme.DeepNavy
@@ -26,11 +28,13 @@ import com.minimal.launcher.ui.theme.TerminalBlue
 
 @Composable
 fun SettingsSearch(onBack: () -> Unit) {
+
     val context = LocalContext.current
     val focusRequester = remember { FocusRequester() }
-    var searchQuery by remember { mutableStateOf("") }
-    
-    // Comprehensive Power-User Settings Map
+
+    var query by remember { mutableStateOf("") }
+
+    /* ---------- SETTINGS MAP ---------- */
     val settingsMap = remember {
         mapOf(
             "wifi" to Settings.ACTION_WIFI_SETTINGS,
@@ -57,64 +61,89 @@ fun SettingsSearch(onBack: () -> Unit) {
         ).toSortedMap()
     }
 
-    val filteredSettings = remember(searchQuery) {
-        settingsMap.filter { it.key.contains(searchQuery, ignoreCase = true) }.toList()
+    /* ---------- FILTER ---------- */
+    val filteredSettings by remember(query) {
+        derivedStateOf {
+            val q = query.trim().lowercase()
+            if (q.isEmpty()) settingsMap.toList()
+            else settingsMap.filterKeys { it.contains(q) }.toList()
+        }
     }
 
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
-    Column(modifier = Modifier.fillMaxSize().background(DeepNavy).padding(20.dp)) {
+    /* ---------- STYLE ---------- */
+    val terminalStyle = TextStyle(
+        color = TerminalBlue,
+        fontFamily = FontFamily.Monospace,
+        fontSize = MaterialTheme.typography.bodyLarge.fontSize
+    )
+
+    /* ---------- UI ---------- */
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(DeepNavy)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(16.dp)
+    ) {
+
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("SET: ", color = TerminalBlue, style = MaterialTheme.typography.bodyLarge)
+            Text("SET: ", style = terminalStyle)
             BasicTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = TerminalBlue),
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+                textStyle = terminalStyle,
                 cursorBrush = SolidColor(TerminalBlue),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                 keyboardActions = KeyboardActions(
                     onGo = {
-                        if (filteredSettings.isNotEmpty()) {
-                            launchSettings(context, filteredSettings.first().second)
+                        filteredSettings.firstOrNull()?.let {
+                            launchSettings(context, it.second)
                             onBack()
                         }
                     }
                 )
             )
         }
-        
-        Spacer(modifier = Modifier.height(10.dp))
-        Divider(color = TerminalBlue.copy(alpha = 0.3f), thickness = 1.dp)
-        Spacer(modifier = Modifier.height(10.dp))
 
-        LazyColumn {
-            items(filteredSettings) { (name, action) ->
+        Spacer(Modifier.height(10.dp))
+        Divider(color = TerminalBlue.copy(alpha = 0.3f))
+        Spacer(Modifier.height(10.dp))
+
+        LazyColumn(Modifier.weight(1f)) {
+            itemsIndexed(filteredSettings) { _, (name, action) ->
                 Text(
-                    text = "[ ${name.lowercase()} ]",
+                    text = "> ${name.lowercase()}",
+                    style = terminalStyle,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { 
+                        .clickable {
                             launchSettings(context, action)
                             onBack()
                         }
-                        .padding(vertical = 12.dp),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = TerminalBlue
+                        .padding(vertical = 12.dp)
                 )
             }
         }
     }
 }
 
+/* ---------- LAUNCH ---------- */
+
 private fun launchSettings(context: Context, action: String) {
-    val intent = Intent(action).apply { 
-        flags = Intent.FLAG_ACTIVITY_NEW_TASK 
-    }
     try {
-        context.startActivity(intent)
-    } catch (e: Exception) {
-        // Log error if needed for debugging
+        context.startActivity(
+            Intent(action).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+        )
+    } catch (_: Exception) {
+        // OEM differences – ignore
     }
 }
